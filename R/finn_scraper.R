@@ -4,10 +4,18 @@
 # Date: 2019 August 22
 ################################################################################
 
-# TODO: Wrap all read_html() function calls in tryCatch() to keep the whole
-# script from failing if the url can"t be accessed.
-
-## Function for scraping a given number of listing pages ----
+#' Scrape finn.no housing data
+#'
+#' Given a starting url, scrape a number of finn.no pages to extract housing
+#' data such as price, location, etc.
+#'
+#' @param url url of the page to start scraping on.
+#' @param pages how many pages to scrape
+#' @param prog_bar display a progress bar?
+#' @param mc_cores number of processor cores to use
+#'
+#' @return A list of length \code{pages} containing data frames of housing data from each page.
+#' @export
 finn_scraper <- function(url, pages = 10, prog_bar = FALSE, mc_cores = 0) {
   
   listing_scraper <- function(listing_url) {
@@ -21,6 +29,12 @@ finn_scraper <- function(url, pages = 10, prog_bar = FALSE, mc_cores = 0) {
       str_extract("\\d+.*(?=(\\skr))") %>%
       str_replace_all("\\s", "") %>%
       as.numeric()
+    
+    # Extract neighborhood info
+    omrade <- listing_html %>%
+      html_nodes("a.truncate") %>%
+      html_text() %>%
+      .[4]
     
     # Extract misc. info
     apt_info <- listing_html %>%
@@ -36,15 +50,9 @@ finn_scraper <- function(url, pages = 10, prog_bar = FALSE, mc_cores = 0) {
       html_node("p.u-caption") %>%
       html_text()
     
-    # Extract neighborhood
-    omrade <- listing_html %>%
-      html_node("span.u-t3") %>%
-      html_text() %>%
-      stringr::str_to_title()
-    
     # Extract transit score from the profil2 website
     finn_code <- as.numeric(apt_info$"FINN-kode")
-    profil2_url <- paste0("https://profil2.nabolag.no/", finn_code, "/transport")
+    profil2_url <- paste0("https://profil2.nabolag.no/", finn_code, "transport")
     walk_score <- tryCatch({
       profil2_html <- read_html(profil2_url)
       profil2_html %>%
@@ -57,7 +65,7 @@ finn_scraper <- function(url, pages = 10, prog_bar = FALSE, mc_cores = 0) {
     
     
     # Extract neighborhood scores
-    profil2_url <- paste0("https://profil2.nabolag.no/", finn_code, "/bomiljo")
+    profil2_url <- paste0("https://profil2.nabolag.no/", finn_code, "bomiljo")
     neighborhood_scores <- tryCatch({
       profil2_html <- read_html(profil2_url)
       profil2_html %>%
@@ -79,10 +87,12 @@ finn_scraper <- function(url, pages = 10, prog_bar = FALSE, mc_cores = 0) {
     out <- tibble(
       address = apt_address,
       omrade = omrade,
+      zip_code = stringr::str_extract(apt_address,
+                                      pattern = "\\d{4}(?=\\sO)"),
       prisantydning = prisantydning,
       totalpris = ifelse(!is.null(apt_info$Totalpris),
                          yes = apt_info$Totalpris %>%
-                           str_extract("\\d+.*(?=(\\skr))") %>%
+                           str_extract("\\d+(\\s|\\d)*(?=(\\skr))") %>%
                            str_replace_all("\\s", "") %>%
                            as.numeric(),
                          no = NA),
@@ -99,7 +109,9 @@ finn_scraper <- function(url, pages = 10, prog_bar = FALSE, mc_cores = 0) {
                        yes = apt_info$Eieform,
                        no = NA),
       soverom = ifelse(!is.null(apt_info$Soverom),
-                       yes = apt_info$Soverom %>% as.numeric(),
+                       yes = apt_info$Soverom %>% 
+                         str_extract("\\d$") %>%
+                         as.numeric(),
                        no = NA),
       primaerrom = ifelse(!is.null(apt_info$Primærrom),
                           yes = apt_info$Primærrom %>%
@@ -147,7 +159,9 @@ finn_scraper <- function(url, pages = 10, prog_bar = FALSE, mc_cores = 0) {
                               as.numeric(),
                             no = NA),
       siste_endret = ifelse(!is.null(apt_info$`Sist endret`),
-                            yes = apt_info$`Sist endret` %>% lubridate::dmy_hm(),
+                            yes = apt_info$`Sist endret` %>% 
+                              lubridate::dmy_hm() %>%
+                              lubridate::as_datetime(),
                             no = NA),
       walk_score = ifelse(!is.null(apt_info$walk_score),
                           yes = apt_info$walk_score,
@@ -189,7 +203,7 @@ finn_scraper <- function(url, pages = 10, prog_bar = FALSE, mc_cores = 0) {
   
   # Return scraping data for every page in pages
   # Parallel processing if mc.cores > 0
-  if (mc_cores > 0) {
+  if (mc_cores > 1) {
     if (prog_bar == TRUE) {
       pbmcapply::pbmclapply(page_list, FUN = function(page_url) {
         tryCatch(page_scraper(page_url),
@@ -201,7 +215,7 @@ finn_scraper <- function(url, pages = 10, prog_bar = FALSE, mc_cores = 0) {
                  error = function(e) NULL)
       }, mc.cores = mc_cores)
     }
-  } else if (mc_cores == 0) {
+  } else if (mc_cores == 1) {
     if (prog_bar == TRUE) {
       pbapply::pblapply(page_list, FUN = function(page_url) {
         tryCatch(page_scraper(page_url),
